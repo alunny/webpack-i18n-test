@@ -9,6 +9,7 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "acorn": "^4.0.3",
     "webpack": "^1.13.1"
   }
 }

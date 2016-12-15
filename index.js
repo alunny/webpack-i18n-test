@@ -3,6 +3,9 @@
 
 var BasicEvaluatedExpression = require('webpack/lib/BasicEvaluatedExpression');
 var ConstDependency = require('webpack/lib/dependencies/ConstDependency');
+var walk = require('acorn/dist/walk');
+
+var I18N_LIB = './i18n-lib';
 
 function TwitterI18NPlugin(phrases, options) {
   if (typeof phrases !== 'object') {
@@ -14,30 +17,62 @@ function TwitterI18NPlugin(phrases, options) {
 
 TwitterI18NPlugin.prototype.apply = function(compiler) {
   var phrases = this.phrases;
+  var asts = {};
+
+  function transformAst(ast, expr, currentWebpackState) {
+    var initialState = {
+      currentWebpackState: currentWebpackState,
+      i18nIdentifier: null,
+      phrases: phrases,
+      requireExpr: expr
+    };
+
+    walk.simple(ast, {
+      CallExpression: function(node, state) {
+        if (!state.i18nIdentifier) {
+          return;
+        }
+
+        if (node.callee.type === 'Identifier' && node.callee.name === state.i18nIdentifier) {
+          var firstI18nArg = node.arguments[0];
+          if (!firstI18nArg || firstI18nArg.type !== 'Literal') {
+            throw new Error('First argument to i18n function must be a string literal');
+          }
+          var translation = state.phrases[firstI18nArg.value];
+
+          if (translation) {
+            // replace full function call, or just the first arg if there are multiple
+            var source = node.arguments.length > 1 ? node.arguments[0] : node;
+            var dep = new ConstDependency(JSON.stringify(translation), source.range);
+            dep.loc = source.loc;
+            state.currentWebpackState.addDependency(dep);
+          }
+        }
+      },
+      VariableDeclarator: function(node, state) {
+        if (node.init === state.requireExpr) {
+          state.i18nIdentifier = node.id.name;
+        }
+      }
+    }, null, initialState);
+  }
 
   compiler.plugin('compilation', function(compilation, params) {
     compilation.dependencyTemplates.set(ConstDependency, new ConstDependency.Template());
   });
 
-  // calls to the underscore (translate) function
-  // this never gets called when underscore is bound to a variable in the module
-  compiler.parser.plugin('call _', function(expr) {
-    var param = this.evaluateExpression(expr.arguments[0]);
-    if (!param.isString) {
-      return;
-    }
-    var str = param.string;
+  // hold onto reference to ast
+  compiler.parser.plugin('program', function(ast) {
+    asts[this.state.current.rawRequest] = ast;
+  });
 
-    var translation = phrases[str];
+  // check for dependency on core/i18n
+  compiler.parser.plugin('call require:commonjs:item', function(expr, param) {
+    var key = this.state.current.rawRequest;
 
-    if (translation) {
-      // replace full function call, or just the first arg if there are multiple
-      var source = expr.arguments.length > 1 ? expr.arguments[0] : expr;
-      var dep = new ConstDependency(JSON.stringify(translation), source.range);
-      dep.loc = source.loc;
-      this.state.current.addDependency(dep);
-
-      return true;
+    if (param.string === I18N_LIB) {
+      transformAst(asts[key], expr, this.state.current);
+      delete asts[key];
     }
   });
 };
